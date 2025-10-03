@@ -1,3 +1,5 @@
+// Modernized version largely written by ChatGPT of an example from 'C++ for Dummies' by Stephen R. Davis, published in 1994 (IDG Books)
+
 #include <iostream>
 #include <memory>
 #include <vector>
