@@ -9,34 +9,16 @@ import Text.Read (readMaybe)
 import Text.Printf (printf)
 import System.IO (hFlush, stdout)
 
--- Account types as distinct data constructors
-data Account
-  = CheckingAccount
-      { accountNumber :: Int
-      , balance :: Int
-      , withdrawalCount :: Int
-      }
-  | SavingsAccount
-      { accountNumber :: Int
-      , balance :: Int
-      }
-  deriving (Show)
+-- =====================================================
+-- Common Money Utilities
+-- =====================================================
 
--- Account creation
-newChecking :: Int -> Account
-newChecking n = CheckingAccount n 0 0
-
-newSavings :: Int -> Account
-newSavings n = SavingsAccount n 0
-
--- Format money as dollars and cents
 formatMoney :: Int -> String
 formatMoney cents =
   let dollars = cents `div` 100
       remainingCents = abs (cents `mod` 100)
   in printf "$%d.%02d" dollars remainingCents
 
--- Parse amount from string
 parseAmount :: String -> Maybe Int
 parseAmount s =
   let trimmed = filter (/= ' ') s
@@ -61,41 +43,6 @@ parseAmount s =
       (before, "") -> [before]
       (before, _:after) -> before : splitOn delim after
 
--- Deposit money
-deposit :: Int -> Account -> Account
-deposit amt acc = case acc of
-  CheckingAccount{..} -> acc { balance = balance + amt }
-  SavingsAccount{..}  -> acc { balance = balance + amt }
-
--- Withdrawals differ per account type
-withdraw :: Int -> Account -> IO Account
-withdraw amt acc = case acc of
-  CheckingAccount{..}
-    | balance < amt -> do
-        putStrLn $ "Insufficient funds: balance " ++ formatMoney balance
-        pure acc
-    | otherwise -> do
-        let newBalance = balance - amt
-            finalBalance = if newBalance < 50000 then newBalance - 20 else newBalance
-        pure acc { balance = finalBalance, withdrawalCount = withdrawalCount + 1 }
-
-  SavingsAccount{..}
-    | balance < amt -> do
-        putStrLn $ "Insufficient funds: balance " ++ formatMoney balance
-        pure acc
-    | otherwise -> do
-        putStrLn "Withdrawal from savings (fee after first withdrawal not tracked here)."
-        pure acc { balance = balance - amt }
-
--- Display account
-displayAccount :: Account -> IO ()
-displayAccount acc = case acc of
-  CheckingAccount{..} ->
-    putStrLn $ "Checking " ++ show accountNumber ++ " = " ++ formatMoney balance
-  SavingsAccount{..}  ->
-    putStrLn $ "Savings " ++ show accountNumber ++ " = " ++ formatMoney balance
-
--- Read account number
 promptAndReadAccountNo :: IO Int
 promptAndReadAccountNo = do
   putStr "Enter account number: "
@@ -103,35 +50,157 @@ promptAndReadAccountNo = do
   input <- getLine
   maybe (putStrLn "Invalid number, using 0" >> pure 0) pure (readMaybe input)
 
--- Process transactions
-processAccount :: Account -> IO Account
-processAccount initial = do
+-- =====================================================
+-- Shared Account Typeclass
+-- =====================================================
+
+class AccountLike a where
+  accountNo     :: a -> Int
+  acntBalance   :: a -> Int
+  deposit       :: Int -> a -> a
+  withdrawal    :: Int -> a -> IO a
+  display       :: a -> IO ()
+
+-- Generic functions that work for any AccountLike
+processAccount :: AccountLike a => a -> IO a
+processAccount acc = do
   putStrLn "Enter positive for deposit, negative for withdrawal, 0 to end"
-  loop initial
+  loop acc
   where
-    loop acc = do
+    loop a = do
       putStr ": "
       hFlush stdout
       input <- getLine
       case parseAmount input of
-        Nothing -> putStrLn "Invalid input" >> loop acc
-        Just 0  -> pure acc
+        Nothing -> putStrLn "Invalid input" >> loop a
+        Just 0  -> pure a
         Just amt
-          | amt > 0 -> loop (deposit amt acc)
+          | amt > 0 -> loop (deposit amt a)
           | otherwise -> do
-              newAcc <- withdraw (abs amt) acc
-              loop newAcc
+              a' <- withdrawal (abs amt) a
+              loop a'
 
--- Bank state
+calculateTotal :: AccountLike a => [a] -> Int
+calculateTotal = sum . map acntBalance
+
+displayAll :: AccountLike a => [a] -> IO ()
+displayAll = mapM_ display
+
+-- =====================================================
+-- Common Account Data
+-- =====================================================
+
+data AccountData = AccountData
+  { accNumber  :: Int
+  , accBalance :: Int
+  } deriving (Show)
+
+-- =====================================================
+-- Checking Account
+-- =====================================================
+
+data Checking = Checking
+  { chkData        :: AccountData
+  , chkWithdrawals :: Int
+  } deriving (Show)
+
+newChecking :: Int -> Checking
+newChecking n = Checking (AccountData n 0) 0
+
+instance AccountLike Checking where
+  accountNo = accNumber . chkData
+  acntBalance = accBalance . chkData
+
+  deposit amt acc =
+    acc { chkData = (chkData acc) { accBalance = accBalance (chkData acc) + amt } }
+
+  withdrawal amt acc
+    | bal < amt = do
+        putStrLn $ "Insufficient funds: balance " ++ formatMoney bal
+        pure acc
+    | otherwise = do
+        let newBal = bal - amt
+            finalBal = if newBal < 50000 then newBal - 20 else newBal
+        pure acc
+          { chkData = (chkData acc) { accBalance = finalBal }
+          , chkWithdrawals = chkWithdrawals acc + 1
+          }
+    where
+      bal = accBalance (chkData acc)
+
+  display acc =
+    putStrLn $ "Checking " ++ show (accountNo acc)
+            ++ " = " ++ formatMoney (acntBalance acc)
+
+-- =====================================================
+-- Savings Account
+-- =====================================================
+
+data Savings = Savings
+  { savData        :: AccountData
+  , savWithdrawals :: Int
+  } deriving (Show)
+
+newSavings :: Int -> Savings
+newSavings n = Savings (AccountData n 0) 0
+
+instance AccountLike Savings where
+  accountNo = accNumber . savData
+  acntBalance = accBalance . savData
+
+  deposit amt acc =
+    acc { savData = (savData acc) { accBalance = accBalance (savData acc) + amt } }
+
+  withdrawal amt acc
+    | bal < amt = do
+        putStrLn $ "Insufficient funds: balance " ++ formatMoney bal
+        pure acc
+    | otherwise = do
+        let fee = if savWithdrawals acc >= 1 then 500 else 0
+        pure acc
+          { savData = (savData acc)
+              { accBalance = bal - amt - fee }
+          , savWithdrawals = savWithdrawals acc + 1
+          }
+    where
+      bal = accBalance (savData acc)
+
+  display acc =
+    putStrLn $ "Savings " ++ show (accountNo acc)
+            ++ " = " ++ formatMoney (acntBalance acc)
+
+-- =====================================================
+-- Existential Wrapper (so we can mix types)
+-- =====================================================
+
+data AnyAccount where
+  AnyAccount :: AccountLike a => a -> AnyAccount
+
+instance AccountLike AnyAccount where
+  accountNo (AnyAccount a) = accountNo a
+  acntBalance (AnyAccount a) = acntBalance a
+  deposit amt (AnyAccount a) = AnyAccount (deposit amt a)
+  withdrawal amt (AnyAccount a) = do
+    a' <- withdrawal amt a
+    pure (AnyAccount a')
+  display (AnyAccount a) = display a
+
+-- =====================================================
+-- Bank State
+-- =====================================================
+
 data BankState = BankState
-  { checkingAccounts :: [Account]
-  , savingsAccounts  :: [Account]
+  { checkingAccounts :: [Checking]
+  , savingsAccounts  :: [Savings]
   } deriving (Show)
 
 emptyBankState :: BankState
 emptyBankState = BankState [] []
 
--- Main banking loop
+-- =====================================================
+-- Banking Loop
+-- =====================================================
+
 bankingLoop :: BankState -> IO BankState
 bankingLoop st = do
   putStrLn "Enter S for Savings, C for Checking, X to exit"
@@ -141,27 +210,34 @@ bankingLoop st = do
       accNo <- promptAndReadAccountNo
       acc <- processAccount (newChecking accNo)
       bankingLoop st { checkingAccounts = acc : checkingAccounts st }
+
     ('s':_) -> do
       accNo <- promptAndReadAccountNo
       acc <- processAccount (newSavings accNo)
       bankingLoop st { savingsAccounts = acc : savingsAccounts st }
+
     ('x':_) -> pure st
     _       -> putStrLn "Invalid option" >> bankingLoop st
 
--- Totals
-calculateTotal :: [Account] -> Int
-calculateTotal = sum . map balance
+-- =====================================================
+-- Display Totals
+-- =====================================================
 
 displayTotals :: BankState -> IO ()
 displayTotals BankState{..} = do
   putStrLn "\nChecking Accounts:"
-  mapM_ displayAccount checkingAccounts
+  displayAll checkingAccounts
+
   putStrLn "\nSavings Accounts:"
-  mapM_ displayAccount savingsAccounts
+  displayAll savingsAccounts
+
   let total = calculateTotal checkingAccounts + calculateTotal savingsAccounts
   putStrLn $ "\nTotal worth of all accounts = " ++ formatMoney total
 
+-- =====================================================
 -- Main
+-- =====================================================
+
 main :: IO ()
 main = do
   final <- bankingLoop emptyBankState
